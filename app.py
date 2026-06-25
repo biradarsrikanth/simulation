@@ -1,5 +1,6 @@
 import streamlit as st
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 
 # --- Page Configuration ---
@@ -30,6 +31,52 @@ max_range = st.sidebar.slider("Max UWB Effective Range (m)", 100, 500, 300, step
 st.sidebar.header("4. Optimization Settings")
 auto_insert_interior = st.sidebar.checkbox("Auto-insert Interior Anchors (Adaptive)", value=True)
 
+# --- Manual Interior Anchors ---
+st.sidebar.header("5. Manual Interior Anchors")
+num_manual_anchors = st.sidebar.number_input(
+    "Number of Manual Interior Anchors",
+    min_value=0,
+    max_value=50,
+    value=0,
+    step=1
+)
+
+# Initialize editable dataframe in session state
+if "manual_anchor_df" not in st.session_state:
+    st.session_state.manual_anchor_df = pd.DataFrame(
+        [{"x": 0.0, "y": 0.0, "z": 0.0, "azimuth": 0.0}]
+    )
+
+target_rows = int(num_manual_anchors)
+df = st.session_state.manual_anchor_df.copy()
+
+# Resize rows to match requested count
+if target_rows == 0:
+    df = pd.DataFrame(columns=["x", "y", "z", "azimuth"])
+elif len(df) < target_rows:
+    add_n = target_rows - len(df)
+    add_df = pd.DataFrame([{"x": 0.0, "y": 0.0, "z": 0.0, "azimuth": 0.0}] * add_n)
+    df = pd.concat([df, add_df], ignore_index=True)
+elif len(df) > target_rows:
+    df = df.iloc[:target_rows].reset_index(drop=True)
+
+edited_df = st.sidebar.data_editor(
+    df,
+    key="manual_anchor_editor",
+    use_container_width=True,
+    num_rows="fixed",
+    hide_index=True,
+    column_config={
+        "x": st.column_config.NumberColumn("X (m)", min_value=-float(pit_radius), max_value=float(pit_radius), step=1.0),
+        "y": st.column_config.NumberColumn("Y (m)", min_value=-float(pit_radius), max_value=float(pit_radius), step=1.0),
+        "z": st.column_config.NumberColumn("Z (m)", min_value=-float(pit_depth), max_value=float(pole_height + 50), step=1.0),
+        "azimuth": st.column_config.NumberColumn("Azimuth (°)", min_value=0.0, max_value=359.9, step=1.0),
+    },
+)
+
+# Persist edited values
+st.session_state.manual_anchor_df = edited_df
+
 # --- Simulation Engine ---
 def generate_pit_mesh(radius, depth, resolution):
     """Generates a simplified 3D paraboloid bowl to represent the open-pit mine."""
@@ -57,7 +104,9 @@ def place_rim_anchors(radius, num_anchors, pole_h):
         z = pole_h  # Top rim is z=0, plus the pole height
         # Azimuth points exactly inward (flip the angle)
         azimuth = np.degrees(theta + np.pi) % 360
-        anchors.append({"id": f"Rim_{idx+1}", "x": x, "y": y, "z": z, "azimuth": azimuth, "type": "Rim"})
+        anchors.append(
+            {"id": f"Rim_{idx+1}", "x": x, "y": y, "z": z, "azimuth": azimuth, "type": "Rim"}
+        )
     return anchors
 
 
@@ -86,7 +135,10 @@ def calculate_coverage(X, Y, Z, mask, anchors, h_bw, tilt, r_max):
         azimuth_rad = np.radians(a["azimuth"])
 
         # Difference angle normalized to [-pi, pi]
-        angle_diff = np.arctan2(np.sin(angle_to_points - azimuth_rad), np.cos(angle_to_points - azimuth_rad))
+        angle_diff = np.arctan2(
+            np.sin(angle_to_points - azimuth_rad),
+            np.cos(angle_to_points - azimuth_rad),
+        )
         in_h_beam = np.abs(np.degrees(angle_diff)) <= (h_bw / 2)
 
         # Combine constraints
@@ -99,6 +151,25 @@ def calculate_coverage(X, Y, Z, mask, anchors, h_bw, tilt, r_max):
 # Run Base Simulation
 X, Y, Z, mask = generate_pit_mesh(pit_radius, pit_depth, grid_resolution)
 anchors = place_rim_anchors(pit_radius, num_rim_anchors, pole_height)
+
+# Build manual anchor list from editable table
+manual_anchors = []
+for i, r in edited_df.iterrows():
+    mx, my, mz, maz = float(r["x"]), float(r["y"]), float(r["z"]), float(r["azimuth"])
+    if (mx ** 2 + my ** 2) <= (pit_radius ** 2):
+        manual_anchors.append({
+            "id": f"Manual_{i+1}",
+            "x": mx,
+            "y": my,
+            "z": mz,
+            "azimuth": maz,
+            "type": "Manual"
+        })
+    else:
+        st.sidebar.warning(f"Manual Anchor {i+1}: (x,y) outside pit boundary; ignored.")
+
+# Include manual anchors before first coverage run
+anchors.extend(manual_anchors)
 coverage_map = calculate_coverage(X, Y, Z, mask, anchors, h_beamwidth, downtilt, max_range)
 
 # Adaptive Algorithm Layer (Section 6 of Spec)
@@ -107,19 +178,21 @@ if auto_insert_interior:
     # Identify coordinates where visible anchors < 4 (Blind / Weak zones)
     weak_zones = (coverage_map < 4) & mask
     if np.any(weak_zones):
-        # Place a fallback interior anchor at representative points in weak zones
         weak_indices = np.argwhere(weak_zones)
-        # Select up to 2 strategic deep points for illustration
         for i in range(min(2, max(1, len(weak_indices) // 10 + 1))):
             idx = weak_indices[int(len(weak_indices) * (i + 1) / (i + 2))]
             int_x, int_y = X[idx[0], idx[1]], Y[idx[0], idx[1]]
-            int_z = Z[idx[0], idx[1]] + pole_height  # Mounted on a mobile trailer/pole
+            int_z = Z[idx[0], idx[1]] + pole_height
 
             interior_anchors_added.append({
-                "id": f"Interior_{i+1}", "x": int_x, "y": int_y, "z": int_z, "azimuth": 0, "type": "Interior"
+                "id": f"Interior_{i+1}",
+                "x": int_x,
+                "y": int_y,
+                "z": int_z,
+                "azimuth": 0,
+                "type": "Interior"
             })
 
-        # Recalculate with interior fixes included
         anchors.extend(interior_anchors_added)
         coverage_map = calculate_coverage(X, Y, Z, mask, anchors, h_beamwidth, downtilt, max_range)
 
@@ -129,7 +202,6 @@ col1, col2 = st.columns([2, 1])
 with col1:
     st.subheader("3D Interactive Coverage Heatmap")
 
-    # Hide outside data for cleaner rendering
     display_coverage = np.copy(coverage_map).astype(float)
     display_coverage[~mask] = np.nan
 
@@ -146,24 +218,38 @@ with col1:
         name="Mine Pit"
     ))
 
-    # Plot Rim Anchors
+    # Rim Anchors
     rim_x = [a["x"] for a in anchors if a["type"] == "Rim"]
     rim_y = [a["y"] for a in anchors if a["type"] == "Rim"]
     rim_z = [a["z"] for a in anchors if a["type"] == "Rim"]
     fig.add_trace(go.Scatter3d(
-        x=rim_x, y=rim_y, z=rim_z, mode='markers',
-        marker=dict(size=6, color='blue', symbol='diamond'),
+        x=rim_x, y=rim_y, z=rim_z,
+        mode="markers",
+        marker=dict(size=6, color="blue", symbol="diamond"),
         name="Rim Anchors"
     ))
 
-    # Plot Adaptive Interior Anchors
+    # Manual Anchors
+    if manual_anchors:
+        man_x = [a["x"] for a in manual_anchors]
+        man_y = [a["y"] for a in manual_anchors]
+        man_z = [a["z"] for a in manual_anchors]
+        fig.add_trace(go.Scatter3d(
+            x=man_x, y=man_y, z=man_z,
+            mode="markers",
+            marker=dict(size=8, color="orange", symbol="square"),
+            name="Manual Interior Anchors"
+        ))
+
+    # Adaptive Interior Anchors
     if interior_anchors_added:
         int_x = [a["x"] for a in interior_anchors_added]
         int_y = [a["y"] for a in interior_anchors_added]
         int_z = [a["z"] for a in interior_anchors_added]
         fig.add_trace(go.Scatter3d(
-            x=int_x, y=int_y, z=int_z, mode='markers',
-            marker=dict(size=8, color='purple', symbol='cross'),
+            x=int_x, y=int_y, z=int_z,
+            mode="markers",
+            marker=dict(size=8, color="purple", symbol="cross"),
             name="Adaptive Interior Anchors"
         ))
 
@@ -182,17 +268,16 @@ with col1:
 with col2:
     st.subheader("Deployment Analytics")
 
-    # Calculations
     total_valid_points = int(np.sum(mask))
     covered_points = int(np.sum((coverage_map >= 4) & mask))
     coverage_pct = (covered_points / total_valid_points) * 100 if total_valid_points > 0 else 0
     blind_points = int(np.sum((coverage_map == 0) & mask))
 
     st.metric("Total Deployed Anchors", len(anchors))
+    st.metric("Manual Interior Anchors", len(manual_anchors))
     st.metric("Target Coverage Met (≥4 Anchors)", f"{coverage_pct:.1f}%")
     st.metric("Blind Points", blind_points)
 
-    # Progress bars / visual status
     if coverage_pct >= 95:
         st.success("✅ Architecture Target Satisfied (Centimeter Accuracy Ready)")
     elif coverage_pct >= 80:
@@ -202,19 +287,17 @@ with col2:
 
     st.markdown("---")
     st.markdown("### Active Anchor Node Manifest")
-    st.dataframe(anchors, use_container_width=True)
+    st.dataframe(pd.DataFrame(anchors), use_container_width=True)
 
 # --- Bottom Documentation ---
 st.markdown("---")
 st.markdown(
     """
 ### How to Run This Online Instantly:
-1. Copy this code block and save it as a file named `app.py`.
-2. Create a file named `requirements.txt` in the same directory and add these lines:
+1. Save this file as `app.py`.
+2. Create `requirements.txt` in the same directory:
    ```text
    streamlit
    plotly
    numpy
-   ```
-"""
-)
+   pandas
