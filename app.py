@@ -130,16 +130,21 @@ def calculate_coverage(X, Y, Z, mask, anchors, h_bw, tilt, r_max):
         # 1. Range Check
         in_range = distances <= r_max
 
-        # 2. Horizontal Beamwidth Check (Azimuth alignment)
-        angle_to_points = np.arctan2(dy, dx)  # Vector from anchor to point
-        azimuth_rad = np.radians(a["azimuth"])
+        # 2. Horizontal coverage check
+        # Interior + Manual anchors are omnidirectional in azimuth
+        if a.get("type") in {"Interior", "Manual"}:
+            in_h_beam = np.ones_like(in_range, dtype=bool)
+        else:
+            # Directional anchors (e.g., Rim)
+            angle_to_points = np.arctan2(dy, dx)  # Vector from anchor to point
+            azimuth_rad = np.radians(a["azimuth"])
 
-        # Difference angle normalized to [-pi, pi]
-        angle_diff = np.arctan2(
-            np.sin(angle_to_points - azimuth_rad),
-            np.cos(angle_to_points - azimuth_rad),
-        )
-        in_h_beam = np.abs(np.degrees(angle_diff)) <= (h_bw / 2)
+            # Difference angle normalized to [-pi, pi]
+            angle_diff = np.arctan2(
+                np.sin(angle_to_points - azimuth_rad),
+                np.cos(angle_to_points - azimuth_rad),
+            )
+            in_h_beam = np.abs(np.degrees(angle_diff)) <= (h_bw / 2)
 
         # Combine constraints
         is_visible = in_range & in_h_beam & flat_mask
