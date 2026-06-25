@@ -289,15 +289,3 @@ with col2:
     st.markdown("### Active Anchor Node Manifest")
     st.dataframe(pd.DataFrame(anchors), use_container_width=True)
 
-# --- Bottom Documentation ---
-st.markdown("---")
-st.markdown(
-    """
-### How to Run This Online Instantly:
-1. Save this file as `app.py`.
-2. Create `requirements.txt` in the same directory:
-   ```text
-   streamlit
-   plotly
-   numpy
-   pandas
